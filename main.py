@@ -1,3 +1,4 @@
+import asyncio
 import os
 from aiohttp import web
 
@@ -118,9 +119,21 @@ async def main():
     await start_web()
     async with bot:
         await load_cogs()
-        await bot.start(token)
+        retry_delay = 60
+        while True:
+            try:
+                await bot.start(token)
+                break
+            except discord.HTTPException as exc:
+                if exc.status != 429:
+                    raise
+                print(
+                    "Discord login was rate-limited (HTTP 429). Keeping the Render "
+                    f"service alive; retrying in {retry_delay} seconds."
+                )
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 1800)
 
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
