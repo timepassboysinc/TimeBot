@@ -4,7 +4,17 @@ from aiohttp import web
 
 async def start_web():
     app = web.Application()
-    app.router.add_get("/", lambda request: web.Response(text="Bot is running"))
+
+    async def health(request):
+        connected = bot.is_ready()
+        username = str(bot.user) if bot.user else "not logged in"
+        return web.json_response({
+            "service": "running",
+            "discord_connected": connected,
+            "bot_user": username,
+        })
+
+    app.router.add_get("/", health)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
@@ -89,6 +99,30 @@ async def enforce_bot_role_access(ctx):
 
 
 @bot.event
+async def on_message(message):
+    # Log command names only; never include message text.
+    if not message.author.bot:
+        ctx = await bot.get_context(message)
+        if ctx.valid and ctx.command:
+            location = message.guild.id if message.guild else "DM"
+            print(f"Received prefix command ?{ctx.command.qualified_name} in {location}")
+    await bot.process_commands(message)
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, (commands.CommandNotFound, commands.CheckFailure)):
+        return
+    original = getattr(error, "original", error)
+    command_name = ctx.command.qualified_name if ctx.command else "unknown"
+    print(f"Command ?{command_name} failed: {type(original).__name__}: {original}")
+    try:
+        await ctx.reply("That command hit an error. The bot owner can check the Render logs for details.", mention_author=False)
+    except discord.HTTPException:
+        pass
+
+
+@bot.event
 async def on_ready():
     await leave_unapproved_guilds()
     print(f"Ready as {bot.user} • prefix {CONFIG.get('prefix', '?')}")
@@ -108,6 +142,7 @@ async def load_cogs():
         if file.name.startswith("_"):
             continue
         await bot.load_extension(f"cogs.{file.stem}")
+        print(f"Loaded cog: {file.stem}")
 
 
 async def main():
@@ -119,6 +154,7 @@ async def main():
     await start_web()
     async with bot:
         await load_cogs()
+        print("All cogs loaded; starting Discord gateway login.")
         # Cloudflare 1015 blocks can persist; avoid frequent login attempts.
         retry_delay = 1800
         while True:
