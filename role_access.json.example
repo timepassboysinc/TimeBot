@@ -1,0 +1,20 @@
+{
+  "guilds": {
+    "SERVER_1_ID": {
+      "role_admin_user_ids": ["YOUR_DISCORD_USER_ID"],
+      "roles": {
+        "KICK_ROLE_ID": ["kick"],
+        "TIMEOUT_ROLE_ID": ["timeout"],
+        "WARN_ROLE_ID": ["warn"],
+        "FULL_ACCESS_ROLE_ID": ["all"]
+      }
+    },
+    "SERVER_2_ID": {
+      "role_admin_user_ids": ["YOUR_DISCORD_USER_ID"],
+      "roles": {
+        "OWNER_ROLE_ID": ["all"],
+        "CO_OWNER_ROLE_ID": ["all"]
+      }
+    }
+  }
+}
