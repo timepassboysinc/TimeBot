@@ -115,6 +115,7 @@ async def main():
         raise RuntimeError("Set DISCORD_TOKEN in .env before starting Time Bot.")
     allowed_guild_ids()
     await init_db()
+    await start_web()
     async with bot:
         await load_cogs()
         await bot.start(token)
