@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 import re
 
@@ -7,6 +8,7 @@ from discord.ext import commands
 
 import access_control
 import database
+from logging_utils import LOG_TITLES, LOG_TYPES, send_log
 
 BLUE = 0x176BFF
 
@@ -26,20 +28,34 @@ class Moderation(commands.Cog):
     async def log_case(self, ctx, member_id, action, reason, expires_at=None):
         stamp = datetime.now(timezone.utc).isoformat()
         case_id = await database.add_case(ctx.guild.id, member_id, ctx.author.id, action, reason, stamp, expires_at)
-        channel_id = await database.get_setting(ctx.guild.id, "modlog_channel")
-        channel = ctx.guild.get_channel(channel_id) if channel_id else None
-        if channel:
-            embed = discord.Embed(title=f"🛡️ Case #{case_id} • {action.title()}", color=BLUE, timestamp=datetime.now(timezone.utc))
-            embed.add_field(name="Member", value=f"<@{member_id}> (`{member_id}`)", inline=True)
-            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-            embed.add_field(name="Reason", value=reason[:1000], inline=False)
-            if expires_at:
-                embed.add_field(name="Expires", value=f"<t:{int(datetime.fromisoformat(expires_at).timestamp())}:R>", inline=True)
-            try:
-                await channel.send(embed=embed)
-            except discord.HTTPException:
-                pass
+        embed = discord.Embed(title=f"🛡️ Case #{case_id} • {action.title()}", color=BLUE, timestamp=datetime.now(timezone.utc))
+        embed.add_field(name="Member", value=f"<@{member_id}> (`{member_id}`)", inline=True)
+        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.add_field(name="Reason", value=reason[:1000], inline=False)
+        if expires_at:
+            embed.add_field(name="Expires", value=f"<t:{int(datetime.fromisoformat(expires_at).timestamp())}:R>", inline=True)
+        category = "warn" if action == "warn" else "timeout" if "timeout" in action else "ban" if action in {"ban", "unban", "softban", "autoban"} else "moderation"
+        await send_log(ctx.guild, category, embed, include_moderation=category != "moderation")
         return case_id
+
+    async def _recent_bot_case(self, guild_id, member_id, actions):
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=15)).isoformat()
+        marks = ",".join("?" for _ in actions)
+        async with aiosqlite.connect(database.DB_PATH) as db:
+            async with db.execute(
+                f"SELECT 1 FROM cases WHERE guild_id=? AND user_id=? AND action IN ({marks}) AND created_at>=? LIMIT 1",
+                (guild_id, member_id, *actions, cutoff),
+            ) as cur:
+                return await cur.fetchone() is not None
+
+    async def _audit_actor(self, guild, action, member_id):
+        try:
+            async for entry in guild.audit_logs(limit=6, action=action):
+                if getattr(entry.target, "id", None) == member_id and (discord.utils.utcnow() - entry.created_at).total_seconds() < 20:
+                    return entry.user, entry.reason or "No reason provided"
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        return None, "No reason provided"
 
     async def target_ok(self, ctx, member):
         if member.id == ctx.author.id:
@@ -61,6 +77,37 @@ class Moderation(commands.Cog):
         channel = channel or ctx.channel
         await database.set_setting(ctx.guild.id, "modlog_channel", channel.id)
         await ctx.reply(f"🩵 Moderation and action logs will go to {channel.mention}.", mention_author=False)
+
+    @commands.command(name="logchannel")
+    async def logchannel(self, ctx, category: str, destination: str):
+        """Set a log destination, e.g. ?logchannel ban #ban-logs; use off to clear it."""
+        category = category.lower()
+        if category not in LOG_TYPES:
+            return await ctx.reply("Log types: `ban`, `warn`, `timeout`, `join`, `leave`, `invite`, `server`, `moderation`.", mention_author=False)
+        key = f"log_channel_{category}"
+        if destination.lower() in {"off", "none", "disable"}:
+            await database.set_setting(ctx.guild.id, key, None)
+            return await ctx.reply(f"{LOG_TITLES[category]} cleared. Any legacy log channel may still receive those events.", mention_author=False)
+        try:
+            channel = await commands.TextChannelConverter().convert(ctx, destination)
+        except commands.BadArgument:
+            return await ctx.reply("Mention a text channel or provide its channel ID, e.g. `?logchannel ban #ban-logs`.", mention_author=False)
+        await database.set_setting(ctx.guild.id, key, channel.id)
+        await ctx.reply(f"✅ {LOG_TITLES[category]} will go to {channel.mention}.", mention_author=False)
+
+    @commands.command(name="logchannels")
+    async def logchannels(self, ctx):
+        rows = []
+        for category in LOG_TYPES:
+            channel_id = await database.get_setting(ctx.guild.id, f"log_channel_{category}")
+            if not channel_id:
+                legacy_key = "modlog_channel" if category in {"ban", "warn", "timeout", "moderation"} else "actionlog_channel"
+                channel_id = await database.get_setting(ctx.guild.id, legacy_key)
+            channel = ctx.guild.get_channel(channel_id) if channel_id else None
+            rows.append(f"**{LOG_TITLES[category]}:** {channel.mention if channel else 'Not set'}")
+        embed = discord.Embed(title="📋 Time Bot log channels", description="\n".join(rows), color=BLUE)
+        embed.set_footer(text="Set one with ?logchannel <type> #channel")
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.command(name="config")
     async def config(self, ctx):
@@ -290,27 +337,60 @@ class Moderation(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
-        channel_id = await database.get_setting(member.guild.id, "actionlog_channel")
-        channel = member.guild.get_channel(channel_id) if channel_id else None
-        if channel:
-            await channel.send(embed=discord.Embed(title="📥 Member joined", description=f"{member.mention} (`{member.id}`)", color=BLUE, timestamp=datetime.now(timezone.utc)))
+        embed = discord.Embed(title="📥 Member joined", description=f"Member: {member.mention}\nUser ID: `{member.id}`\nAccount created: {discord.utils.format_dt(member.created_at, style='F')}", color=BLUE, timestamp=datetime.now(timezone.utc))
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await send_log(member.guild, "join", embed)
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):
-        channel_id = await database.get_setting(member.guild.id, "actionlog_channel")
-        channel = member.guild.get_channel(channel_id) if channel_id else None
-        if channel:
-            await channel.send(embed=discord.Embed(title="📤 Member left", description=f"{member} (`{member.id}`)", color=BLUE, timestamp=datetime.now(timezone.utc)))
+        embed = discord.Embed(title="📤 Member left", description=f"Member: {discord.utils.escape_markdown(str(member))}\nUser ID: `{member.id}`", color=BLUE, timestamp=datetime.now(timezone.utc))
+        await send_log(member.guild, "leave", embed)
+        await asyncio.sleep(2)
+        if await self._recent_bot_case(member.guild.id, member.id, ("kick",)):
+            return
+        moderator, reason = await self._audit_actor(member.guild, discord.AuditLogAction.kick, member.id)
+        if moderator:
+            embed = discord.Embed(title="👢 Member kicked", description=f"Member: {member} (`{member.id}`)\nModerator: {moderator.mention}\nReason: {reason}", color=BLUE, timestamp=datetime.now(timezone.utc))
+            await send_log(member.guild, "moderation", embed)
+
+    @commands.Cog.listener()
+    async def on_member_ban(self, guild, user):
+        await asyncio.sleep(2)
+        if await self._recent_bot_case(guild.id, user.id, ("ban", "softban", "autoban")):
+            return
+        moderator, reason = await self._audit_actor(guild, discord.AuditLogAction.ban, user.id)
+        embed = discord.Embed(title="🔨 Member banned", description=f"Member: {user} (`{user.id}`)\nModerator: {moderator.mention if moderator else 'Unknown'}\nReason: {reason}", color=BLUE, timestamp=datetime.now(timezone.utc))
+        await send_log(guild, "ban", embed, include_moderation=True)
+
+    @commands.Cog.listener()
+    async def on_member_unban(self, guild, user):
+        await asyncio.sleep(2)
+        if await self._recent_bot_case(guild.id, user.id, ("unban",)):
+            return
+        moderator, reason = await self._audit_actor(guild, discord.AuditLogAction.unban, user.id)
+        embed = discord.Embed(title="🔓 Member unbanned", description=f"Member: {user} (`{user.id}`)\nModerator: {moderator.mention if moderator else 'Unknown'}\nReason: {reason}", color=BLUE, timestamp=datetime.now(timezone.utc))
+        await send_log(guild, "ban", embed, include_moderation=True)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before, after):
+        if before.timed_out_until == after.timed_out_until:
+            return
+        action = "timeout" if after.is_timed_out() else "untimeout"
+        await asyncio.sleep(2)
+        if await self._recent_bot_case(after.guild.id, after.id, (action,)):
+            return
+        moderator, reason = await self._audit_actor(after.guild, discord.AuditLogAction.member_update, after.id)
+        until = f"\nExpires: {discord.utils.format_dt(after.timed_out_until, style='R')}" if after.timed_out_until else ""
+        embed = discord.Embed(title="🔇 Member timed out" if action == "timeout" else "🔊 Timeout removed", description=f"Member: {after.mention} (`{after.id}`)\nModerator: {moderator.mention if moderator else 'Unknown'}\nReason: {reason}{until}", color=BLUE, timestamp=datetime.now(timezone.utc))
+        await send_log(after.guild, "timeout", embed, include_moderation=True)
 
     @commands.Cog.listener()
     async def on_message_delete(self, message):
         if not message.guild or message.author.bot:
             return
-        channel_id = await database.get_setting(message.guild.id, "actionlog_channel")
-        channel = message.guild.get_channel(channel_id) if channel_id else None
-        if channel:
-            excerpt = message.content[:900] or "(no text content)"
-            await channel.send(embed=discord.Embed(title="🗑️ Message deleted", description=f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:** {excerpt}", color=BLUE, timestamp=datetime.now(timezone.utc)))
+        excerpt = message.content[:900] or "(no text content)"
+        embed = discord.Embed(title="🗑️ Message deleted", description=f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:** {excerpt}", color=BLUE, timestamp=datetime.now(timezone.utc))
+        await send_log(message.guild, "server", embed)
 
 
 async def setup(bot):

@@ -29,6 +29,8 @@ COMMAND_ACCESS_GROUPS = {
     "softban": "all",
     "autoban": "all",
     "setlog": "all",
+    "logchannel": "all",
+    "logchannels": "all",
     "config": "all",
     "purge": "all",
     "lock": "all",

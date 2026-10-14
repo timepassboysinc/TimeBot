@@ -8,6 +8,7 @@ from discord.ext import commands, tasks
 
 import access_control
 import database
+from logging_utils import send_log
 
 BLUE = 0x176BFF
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -321,13 +322,10 @@ class Automation(commands.Cog):
     async def on_message_edit(self, before, after):
         if not after.guild or after.author.bot or before.content == after.content:
             return
-        channel_id = await database.get_setting(after.guild.id, "actionlog_channel")
-        channel = after.guild.get_channel(channel_id) if channel_id else None
-        if channel:
-            embed = discord.Embed(title="✏️ Message edited", description=f"**Author:** {after.author.mention}\n**Channel:** {after.channel.mention}\n[Jump to message]({after.jump_url})", color=BLUE, timestamp=datetime.now(timezone.utc))
-            embed.add_field(name="Before", value=before.content[:900] or "(empty)", inline=False)
-            embed.add_field(name="After", value=after.content[:900] or "(empty)", inline=False)
-            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        embed = discord.Embed(title="✏️ Message edited", description=f"**Author:** {after.author.mention}\n**Channel:** {after.channel.mention}\n[Jump to message]({after.jump_url})", color=BLUE, timestamp=datetime.now(timezone.utc))
+        embed.add_field(name="Before", value=before.content[:900] or "(empty)", inline=False)
+        embed.add_field(name="After", value=after.content[:900] or "(empty)", inline=False)
+        await send_log(after.guild, "server", embed)
 
 
 async def setup(bot):

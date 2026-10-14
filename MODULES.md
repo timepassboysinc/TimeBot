@@ -5,7 +5,7 @@ Time Bot is a new, independent bot with Dyno-style features. It is not a copy of
 | Module | Coverage | Notes |
 |---|---|---|
 | AFK | Basic | `?afk`; removes status when the user speaks and replies to mentions. |
-| Action Log | Partial | Join/leave, message delete/edit, and moderation logs. |
+| Action Log | Partial | Configurable ban, warn, timeout, join/leave, invite, server, and moderation logs via `?logchannel`; `?logchannels` lists destinations. Manual moderation actor details need View Audit Log. |
 | Announcements | Basic | `?announce` posts a message to a chosen channel. |
 | Auto Delete | Basic | Link auto-delete toggle. |
 | Auto Message | Basic | Repeating scheduled message. |

@@ -3,6 +3,7 @@ import discord
 from discord.ext import commands
 
 import database
+from logging_utils import send_log
 
 BLUE = 0x176BFF
 
@@ -37,10 +38,14 @@ class InviteTracking(commands.Cog):
     async def on_invite_create(self, invite):
         cache = self.invite_cache.setdefault(invite.guild.id, {})
         cache[invite.code] = (invite.uses or 0, invite.inviter.id if invite.inviter else None)
+        embed = discord.Embed(title="🔗 Invite created", description=f"Code: `{invite.code}`\nCreated by: {invite.inviter.mention if invite.inviter else 'Unknown'}\nChannel: {invite.channel.mention if invite.channel else 'Unknown'}", color=BLUE, timestamp=discord.utils.utcnow())
+        await send_log(invite.guild, "invite", embed)
 
     @commands.Cog.listener()
     async def on_invite_delete(self, invite):
         self.invite_cache.setdefault(invite.guild.id, {}).pop(invite.code, None)
+        embed = discord.Embed(title="🗑️ Invite deleted", description=f"Code: `{invite.code}`\nCreated by: {invite.inviter.mention if invite.inviter else 'Unknown'}", color=BLUE, timestamp=discord.utils.utcnow())
+        await send_log(invite.guild, "invite", embed)
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
@@ -48,8 +53,11 @@ class InviteTracking(commands.Cog):
         try:
             current_invites = await member.guild.invites()
         except (discord.Forbidden, discord.HTTPException):
+            embed = discord.Embed(title="📨 Member joined", description=f"Member: {member.mention} (`{member.id}`)\nInvite: Could not be identified (Time Bot needs Manage Server to inspect invites).", color=BLUE, timestamp=discord.utils.utcnow())
+            await send_log(member.guild, "invite", embed)
             return
         used_invite = None
+        used_code = None
         updated = {}
         for invite in current_invites:
             uses = invite.uses or 0
@@ -58,16 +66,20 @@ class InviteTracking(commands.Cog):
             old_uses, old_inviter = previous.get(invite.code, (0, inviter_id))
             if inviter_id and uses > old_uses:
                 used_invite = inviter_id
+                used_code = invite.code
         self.invite_cache[member.guild.id] = updated
-        if not used_invite:
-            return
-        async with aiosqlite.connect(database.DB_PATH) as db:
-            await db.execute(
-                "INSERT INTO invite_counts(guild_id,user_id,uses) VALUES(?,?,1) "
-                "ON CONFLICT(guild_id,user_id) DO UPDATE SET uses=uses+1",
-                (member.guild.id, used_invite),
-            )
-            await db.commit()
+        if used_invite:
+            async with aiosqlite.connect(database.DB_PATH) as db:
+                await db.execute(
+                    "INSERT INTO invite_counts(guild_id,user_id,uses) VALUES(?,?,1) "
+                    "ON CONFLICT(guild_id,user_id) DO UPDATE SET uses=uses+1",
+                    (member.guild.id, used_invite),
+                )
+                await db.commit()
+        inviter = member.guild.get_member(used_invite) if used_invite else None
+        embed = discord.Embed(title="📨 Invite used", description=f"Member: {member.mention} (`{member.id}`)\nInvite: `{used_code}`" if used_code else f"Member: {member.mention} (`{member.id}`)\nInvite: Unknown or vanity invite", color=BLUE, timestamp=discord.utils.utcnow())
+        embed.add_field(name="Invited by", value=inviter.mention if inviter else (f"<@{used_invite}> (`{used_invite}`)" if used_invite else "Unknown"), inline=False)
+        await send_log(member.guild, "invite", embed)
 
     @commands.command(name="invites")
     async def invites(self, ctx, member: discord.Member = None):
