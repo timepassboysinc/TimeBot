@@ -119,7 +119,8 @@ async def main():
     await start_web()
     async with bot:
         await load_cogs()
-        retry_delay = 60
+        # Cloudflare 1015 blocks can persist; avoid frequent login attempts.
+        retry_delay = 1800
         while True:
             try:
                 await bot.start(token)
@@ -132,7 +133,7 @@ async def main():
                     f"service alive; retrying in {retry_delay} seconds."
                 )
                 await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 1800)
+                retry_delay = min(retry_delay * 2, 21600)
 
 
 if __name__ == "__main__":
